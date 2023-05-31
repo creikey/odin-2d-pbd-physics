@@ -147,16 +147,22 @@ Camera :: struct {
 
 camera := Camera{scale = 100.0} // 100 pixels = 1 meter
 
+flip :: proc(v: V2) -> V2 {
+	to_return := v
+	to_return.y *= -1.0
+	return to_return
+}
+
 into_world :: proc(v: V2) -> V2 {
     // screen =  (camera.offset + world)*scale
     // screen/scale =  camera.offset + world
     // screen/scale - camera.offset = world
 
-    return v/camera.scale - camera.offset
+	return flip(v/camera.scale - camera.offset)
 }
 
 into_screen :: proc(v: V2) -> V2 {
-    return (camera.offset + v)*camera.scale
+	return flip((camera.offset + v)*camera.scale)
 }
 
 // the world is for getting the shapes in the body
@@ -213,7 +219,7 @@ main :: proc() {
 
             // ui processing and drawing
             if raylib.IsMouseButtonDown(raylib.MouseButton.LEFT) {
-                camera.offset += raylib.GetMouseDelta() / camera.scale
+                camera.offset += flip(raylib.GetMouseDelta()/camera.scale)
             }
 
             // draw reference grid in world
@@ -240,9 +246,6 @@ main :: proc() {
             }
 
             raylib.ClearBackground(grey(0.1))
-
-            raylib.DrawText("Congrats bro", 190, 200, 20, raylib.LIGHTGRAY)
-            raylib.DrawLineV(V2{0, 0}, V2{100, 100}, rgb(0, 1, 0))
         }
     }
 
