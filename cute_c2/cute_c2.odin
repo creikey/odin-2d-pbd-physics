@@ -1,8 +1,14 @@
 package cute_c2
 
 import "core:math/linalg"
+import "core:c"
 
 c2v :: linalg.Vector2f32
+
+
+#assert(size_of(c2v{}.x) == size_of(c.float))
+#assert(size_of(c2v{}.y) == size_of(c.float))
+
 
 foreign import lib {
 	"cute_c2_impl.lib"
@@ -15,15 +21,18 @@ c2x :: struct {
 }
 
 c2Poly :: struct {
-	count: i32,
+	count: c.int,
 	verts: [C2_MAX_POLYGON_VERTS]c2v,
 	norms: [C2_MAX_POLYGON_VERTS]c2v,
 }
 
 c2Manifold :: struct {
-	count: i32,
-	depths: [2]f32,
+	count: c.int,
+	depths: [2]c.float,
 	contact_points: [2]c2v,
+
+	// always points from shape A to shape B (first and second shapes passed into
+	// any of the c2***to***Manifold functions)
 	n: c2v,
 }
 

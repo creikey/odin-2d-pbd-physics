@@ -37,6 +37,7 @@ Body :: struct {
     gen: Generation,
     exists: bool,
 
+	prev_pos: V2, // for PBD bodies
     pos, vel: V2,
     ang, angvel: float,
     
@@ -200,29 +201,53 @@ make_c2poly :: proc(body: Body, shape: Shape) -> cute_c2.c2Poly {
 }
 
 process :: proc(world: ^World, timestep: float) {
-	for body_lit, index in world.bodies {
-		if body_lit.exists {
-			body := &world.bodies[index]
-			
-			for other_body, other_index in world.bodies {
-				if other_index != index && other_body.exists {
-					from_shape, ok := pool_dereference(world.shapes, body.shape_list).?
-					assert(ok)
-					other_shape: ^Shape
-					other_shape, ok = pool_dereference(world.shapes, other_body.shape_list).?
-					assert(ok)
-					out: cute_c2.c2Manifold = cute_c2.c2Manifold{}
-					from_c2poly := make_c2poly(body^, from_shape^)
-					to_c2poly := make_c2poly(other_body, other_shape^)
-					cute_c2.c2PolytoPolyManifold(&from_c2poly, nil, &to_c2poly, nil, &out)
+	num_sub_steps := 100
 
-					fmt.println(out)
-				}
+	for sub_step in 0..=num_sub_steps-1 {
+		dt: float = timestep / cast(float)num_sub_steps
+
+		for body, index in world.bodies {
+			if body.exists {
+				world.bodies[index].prev_pos = body.pos
+				world.bodies[index].pos += body.vel * dt
 			}
+		}
 
-			body.pos += body.vel * timestep
+		// solve positions
+		for from_body, from_index in world.bodies {
+			if from_body.exists {
+				for other_body, other_index in world.bodies {
+					if other_index != from_index && other_body.exists {
+						from_shape, ok := pool_dereference(world.shapes, from_body.shape_list).?
+						assert(ok)
+						other_shape: ^Shape
+						other_shape, ok = pool_dereference(world.shapes, other_body.shape_list).?
+						assert(ok)
+
+						out: cute_c2.c2Manifold = cute_c2.c2Manifold{}
+						from_c2poly := make_c2poly(from_body, from_shape^)
+						to_c2poly := make_c2poly(other_body, other_shape^)
+						cute_c2.c2PolytoPolyManifold(&from_c2poly, nil, &to_c2poly, nil, &out)
+
+						if out.count > 0 {
+							for i in 0..=out.count-1 {
+								world.bodies[from_index ].pos += -out.n * out.depths[i]/2.0
+								world.bodies[other_index].pos +=  out.n * out.depths[i]/2.0
+							}
+						}
+					}
+				}
+
+			}
+		}
+
+		for body, index in world.bodies {
+			if body.exists {
+				world.bodies[index].vel = (body.pos - body.prev_pos) / dt
+			}
 		}
 	}
+
 }
 
 main :: proc() {
