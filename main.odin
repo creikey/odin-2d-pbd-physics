@@ -5,6 +5,8 @@ import "core:mem"
 import "core:math/linalg"
 import "vendor:raylib"
 
+import "cute_c2"
+
 rgb :: proc(r, g, b: f32) -> raylib.Color {
     return raylib.Color{cast(u8) (r*255.0), cast(u8) (g*255.0), cast(u8) (b*255.0), 255}
 }
@@ -101,11 +103,14 @@ pool_dereference :: proc(pool: [dynamic]$T, handle: GenHandle) -> Maybe(^T) {
     return &pool[handle.index]
 }
 
-make_rect_body :: proc(w: ^World, at: V2) -> GenHandle {
+make_rect_body :: proc(w: ^World, b: Body) -> GenHandle {
     new_body := allocate_from_pool(&w.bodies)
     new_shape := allocate_from_pool(&w.shapes)
     new_shape.size = V2{1, 1}
-    new_body.pos = at
+	old_gen := new_body.gen
+	new_body^ = b
+	new_body.exists = true
+	new_body.gen = old_gen
     new_body.shape_list = get_pool_handle(w.shapes, new_shape)
     return get_pool_handle(w.bodies, new_body)
 }
@@ -122,6 +127,7 @@ body_local_to_world :: proc(b: Body, point: V2) -> V2 {
     return rotated + b.pos
 }
 
+// points are in world coordinates
 shape_points_in_body :: proc(b: Body, s: Shape) -> [4]V2 {
     points := [4]V2{ 
         V2{-s.size.x, s.size.y},
@@ -183,25 +189,56 @@ dbgtext :: proc(text: cstring, at: V2, size: float, color: raylib.Color) {
     raylib.DrawText(text, cast(i32)at.x, cast(i32)at.y, cast(i32)size, color)
 }
 
-process :: proc(world: ^World, timestep: float) {
+make_c2poly :: proc(body: Body, shape: Shape) -> cute_c2.c2Poly {
+	points := shape_points_in_body(body, shape)
+	to_return := cute_c2.c2Poly{count = 4}
+	for i in 0..=3 {
+		to_return.verts[i] = points[i]
+	}
+	cute_c2.c2MakePoly(&to_return)
+	return to_return
+}
 
+process :: proc(world: ^World, timestep: float) {
+	for body_lit, index in world.bodies {
+		if body_lit.exists {
+			body := &world.bodies[index]
+			
+			for other_body, other_index in world.bodies {
+				if other_index != index && other_body.exists {
+					from_shape, ok := pool_dereference(world.shapes, body.shape_list).?
+					assert(ok)
+					other_shape: ^Shape
+					other_shape, ok = pool_dereference(world.shapes, other_body.shape_list).?
+					assert(ok)
+					out: cute_c2.c2Manifold = cute_c2.c2Manifold{}
+					from_c2poly := make_c2poly(body^, from_shape^)
+					to_c2poly := make_c2poly(other_body, other_shape^)
+					cute_c2.c2PolytoPolyManifold(&from_c2poly, nil, &to_c2poly, nil, &out)
+
+					fmt.println(out)
+				}
+			}
+
+			body.pos += body.vel * timestep
+		}
+	}
 }
 
 main :: proc() {
     raylib.SetConfigFlags({raylib.ConfigFlag.WINDOW_RESIZABLE})
     screen_size := V2{1280, 720}
+	camera.offset = into_world(screen_size/2.0)
     raylib.InitWindow(cast(i32)screen_size.x, cast(i32)screen_size.y, "Hello")
     fmt.println("What's up dawg")
 
     world := World{}
+	defer delete(world.bodies)
+	defer delete(world.shapes)
     time: f64 = 0.0
     unprocessed_time: f64 = 0.0
-    body := make_rect_body(&world, V2{0, 0})
-    {
-        body_unstable, ok := pool_dereference(world.bodies, body).?
-        assert(ok)
-        body_unstable.pos = V2{2, 1}
-    }
+    make_rect_body(&world, Body{pos = V2{2, 1}, vel = V2{1, 0}})
+    make_rect_body(&world, Body{pos = V2{-1, 1.5}, vel = V2{2, 0}})
 
     for !raylib.WindowShouldClose() {
         defer free_all(context.temp_allocator)
