@@ -215,7 +215,7 @@ make_c2poly :: proc(body: Body, shape: Shape) -> cute_c2.c2Poly {
 }
 
 DbgBlip :: struct {
-	lifetime: f32
+	lifetime: f32,
 	at_world: V2,
 }
 
@@ -385,6 +385,23 @@ scene_chaos_init :: proc(state: ^SceneState, world: ^World) {
 	}
 }
 
+unwrap :: proc(mayb: Maybe($T)) -> T {
+	val, ok := mayb.?
+	assert(ok)
+	return val
+}
+
+scene_multiple_shapes_init :: proc(state: ^SceneState, world: ^World) {
+    //make_rect_body(world, Body{pos = V2{2, 1}, vel = V2{-1, 0}, inverse_mass = 1})
+	from_body_handle := make_rect_body(world, Body{pos = V2{-2, 1}, vel = V2{2, 0}, inverse_mass = 1})
+	from_body := unwrap(pool_dereference(world.bodies, from_body_handle))
+	next_shape := unwrap(pool_dereference(world.shapes,from_body.shape_list))
+
+    new_shape := allocate_from_pool(&world.shapes)
+	new_shape.offset = V2{0,1}
+	next_shape.next = get_pool_handle(world.shapes, new_shape)
+}
+
 SceneInfo :: struct {
 	name: string,
 	init_function: proc(state: ^SceneState, world: ^World),
@@ -392,10 +409,12 @@ SceneInfo :: struct {
 }
 
 scenes := []SceneInfo {
-	SceneInfo{"position testing", scene_position_testing_init, scene_position_testing_process}
-	SceneInfo{"simple boxes", scene_simple_boxes_init, scene_simple_boxes_process}
-	SceneInfo{"chaos", scene_chaos_init, scene_simple_boxes_process}
+	SceneInfo{"position testing", scene_position_testing_init, scene_position_testing_process},
+	SceneInfo{"simple boxes", scene_simple_boxes_init, scene_simple_boxes_process},
+	SceneInfo{"chaos", scene_chaos_init, scene_simple_boxes_process},
+	SceneInfo{"multiple shapes", scene_multiple_shapes_init, scene_simple_boxes_process},
 }
+starting_scene_index := 3
 
 switch_to_scene :: proc(state: ^SceneState, world: ^World, to: SceneInfo) {
 	clear(&world.bodies)
@@ -434,7 +453,7 @@ main :: proc() {
 
     world := World{}
 	state := SceneState{}
-	cur_scene_index := 0
+	cur_scene_index := starting_scene_index
 	cur_scene: SceneInfo = scenes[cur_scene_index]
 	switch_to_scene(&state, &world, cur_scene)
 	defer delete(world.bodies)
