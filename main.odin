@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:mem"
 import "core:math/linalg"
+import "core:strings"
 import "vendor:raylib"
 
 import "cute_c2"
@@ -37,7 +38,12 @@ Body :: struct {
     gen: Generation,
     exists: bool,
 
-	prev_pos: V2, // for PBD bodies
+	inverse_mass: float,
+
+	// for PBD bodies
+	prev_pos: V2, 
+	prev_ang: float,
+
     pos, vel: V2,
     ang, angvel: float,
     
@@ -128,6 +134,14 @@ body_local_to_world :: proc(b: Body, point: V2) -> V2 {
     return rotated + b.pos
 }
 
+body_world_to_local :: proc(b: Body, world: V2) -> V2 {
+	// world = rotated(local) + pos
+	// world - pos = rotated(local)
+	// rotated_negative(world - pos) = local
+
+	return rotate(world - b.pos, -b.ang)
+}
+
 // points are in world coordinates
 shape_points_in_body :: proc(b: Body, s: Shape) -> [4]V2 {
     points := [4]V2{ 
@@ -152,7 +166,7 @@ Camera :: struct {
     scale: float,
 }
 
-camera := Camera{scale = 100.0} // 100 pixels = 1 meter
+camera := Camera{scale = 25.0} // 25 pixels = 1 meter
 
 flip :: proc(v: V2) -> V2 {
 	to_return := v
@@ -165,7 +179,7 @@ into_world :: proc(v: V2) -> V2 {
     // screen/scale =  camera.offset + world
     // screen/scale - camera.offset = world
 
-	return flip(v/camera.scale - camera.offset)
+	return (flip(v)/camera.scale - camera.offset)
 }
 
 into_screen :: proc(v: V2) -> V2 {
@@ -173,13 +187,13 @@ into_screen :: proc(v: V2) -> V2 {
 }
 
 // the world is for getting the shapes in the body
-draw_body :: proc(w: World, body: Body) {
+draw_body :: proc(w: World, body: Body, color: raylib.Color) {
     cur_shape, shape_ok := pool_dereference(w.shapes, body.shape_list).?
     for shape_ok {
         points := shape_points_in_body(body, cur_shape^)
 
         for i in 0..=len(points)-1 {
-            raylib.DrawLineV(into_screen(points[i]), into_screen(points[(i + 1) % len(points)]), rgb(1, 0, 0))
+            raylib.DrawLineV(into_screen(points[i]), into_screen(points[(i + 1) % len(points)]), color)
         }
 
         cur_shape, shape_ok = pool_dereference(w.shapes, cur_shape.next).?
@@ -200,8 +214,75 @@ make_c2poly :: proc(body: Body, shape: Shape) -> cute_c2.c2Poly {
 	return to_return
 }
 
+DbgBlip :: struct {
+	lifetime: f32
+	at_world: V2,
+}
+
+debug: [dynamic]DbgBlip
+
+dbgblip :: proc(point: V2) {
+	found := false
+	new_blip := DbgBlip{lifetime = 1.0, at_world = point}
+	for d, index in debug {
+		if d.lifetime == 0.0 { 
+			debug[index] = new_blip
+			found = true
+			break
+		}
+	}
+	if !found {
+		append(&debug, new_blip)
+	}
+}
+
+// as if v1 and v2 were 3d vectors, with no depth, and it returns
+// the Z value of the resulting actual cross product
+cross :: proc(v1, v2: V2) -> float {
+	return v1.x*v2.y - v1.y*v2.x;
+}
+
+do_position_correction :: proc(world: ^World, from_body, other_body: ^Body) {
+	from_shape, ok := pool_dereference(world.shapes, from_body.shape_list).?
+	assert(ok)
+	other_shape: ^Shape
+	other_shape, ok = pool_dereference(world.shapes, other_body.shape_list).?
+	assert(ok)
+
+	out: cute_c2.c2Manifold = cute_c2.c2Manifold{}
+	from_c2poly := make_c2poly(from_body^, from_shape^)
+	to_c2poly := make_c2poly(other_body^, other_shape^)
+	cute_c2.c2PolytoPolyManifold(&from_c2poly, nil, &to_c2poly, nil, &out)
+
+	if out.count > 0 {
+		for i in 0..=out.count-1 {
+			delta_x := out.depths[i]
+			r1 := body_world_to_local(from_body^, out.contact_points[i])
+			r2 := body_world_to_local(other_body^, out.contact_points[i])
+
+			n := out.n
+			c := out.depths[i]
+
+			w1 := cross(r1, n) * cross(r1, n) + from_body.inverse_mass
+			w2 := cross(r2, n) * cross(r2, n) + other_body.inverse_mass
+
+			lambda_delta := (-c) / (w1 + w2)
+
+			p := lambda_delta * n
+
+			from_body.pos += p * from_body.inverse_mass
+			other_body.pos -= p * other_body.inverse_mass
+
+			from_body.ang +=  cross(r1, p)
+			other_body.ang -=  cross(r2, p)
+
+			dbgblip(out.contact_points[i])
+		}
+	}
+}
+
 process :: proc(world: ^World, timestep: float) {
-	num_sub_steps := 100
+	num_sub_steps := 1
 
 	for sub_step in 0..=num_sub_steps-1 {
 		dt: float = timestep / cast(float)num_sub_steps
@@ -209,7 +290,10 @@ process :: proc(world: ^World, timestep: float) {
 		for body, index in world.bodies {
 			if body.exists {
 				world.bodies[index].prev_pos = body.pos
+				world.bodies[index].prev_ang = body.ang
+
 				world.bodies[index].pos += body.vel * dt
+				world.bodies[index].ang += body.angvel * dt
 			}
 		}
 
@@ -218,36 +302,109 @@ process :: proc(world: ^World, timestep: float) {
 			if from_body.exists {
 				for other_body, other_index in world.bodies {
 					if other_index != from_index && other_body.exists {
-						from_shape, ok := pool_dereference(world.shapes, from_body.shape_list).?
-						assert(ok)
-						other_shape: ^Shape
-						other_shape, ok = pool_dereference(world.shapes, other_body.shape_list).?
-						assert(ok)
-
-						out: cute_c2.c2Manifold = cute_c2.c2Manifold{}
-						from_c2poly := make_c2poly(from_body, from_shape^)
-						to_c2poly := make_c2poly(other_body, other_shape^)
-						cute_c2.c2PolytoPolyManifold(&from_c2poly, nil, &to_c2poly, nil, &out)
-
-						if out.count > 0 {
-							for i in 0..=out.count-1 {
-								world.bodies[from_index ].pos += -out.n * out.depths[i]/2.0
-								world.bodies[other_index].pos +=  out.n * out.depths[i]/2.0
-							}
-						}
+						do_position_correction(world, &world.bodies[from_index], &world.bodies[other_index])
 					}
 				}
-
 			}
 		}
 
 		for body, index in world.bodies {
 			if body.exists {
 				world.bodies[index].vel = (body.pos - body.prev_pos) / dt
+				world.bodies[index].angvel = (body.ang - body.prev_ang) / dt
 			}
 		}
 	}
 
+	total_energy: f32 = 0.0
+	for body in world.bodies {
+		total_energy += 0.5 * (linalg.length(body.vel) * linalg.length(body.vel)) / body.inverse_mass
+		total_energy += abs(body.angvel)
+	}
+	fmt.printf("Total Energy: %v\n", total_energy)
+}
+
+// state used by some scenes
+SceneState :: struct {
+	unprocessed_time: f64,
+	paused: bool,
+}
+
+
+scene_position_testing_init :: proc(state: ^SceneState, world: ^World) {
+    make_rect_body(world, Body{pos = V2{2, 1}, vel = V2{-1, 0}, inverse_mass = 1})
+    make_rect_body(world, Body{pos = V2{-1, 1.5}, vel = V2{2, 0}, inverse_mass = 1})
+}
+
+scene_position_testing_process :: proc(state: ^SceneState, world: ^World) {
+	stationary_body := &world.bodies[0]
+	moving_body := &world.bodies[1]
+	assert(stationary_body.exists)
+	assert(moving_body.exists)
+	stationary_body.pos = V2{0,0}
+	stationary_body.ang = 0.0
+	moving_body.pos = into_world(raylib.GetMousePosition())
+	moving_body.ang = 0.0
+	draw_body(world^, moving_body^, rgb(0, 1, 0))
+	draw_body(world^, stationary_body^, rgb(0, 1, 0))
+	do_position_correction(world, stationary_body, moving_body)
+}
+
+scene_simple_boxes_init :: proc(state: ^SceneState, world: ^World) {
+    make_rect_body(world, Body{pos = V2{2, 1}, vel = V2{-1, 0}, inverse_mass = 1})
+    make_rect_body(world, Body{pos = V2{-1, 1.5}, vel = V2{2, 0}, inverse_mass = 1})
+}
+
+scene_simple_boxes_process :: proc(state: ^SceneState, world: ^World) {
+	if !state.paused {
+		state.unprocessed_time += cast(f64) raylib.GetFrameTime()
+		for state.unprocessed_time > TIMESTEP {
+			defer state.unprocessed_time -= TIMESTEP
+			process(world, TIMESTEP)
+		}
+	}
+}
+
+scene_chaos_init :: proc(state: ^SceneState, world: ^World) {
+	hash11 :: proc(p: f32) -> f32 {
+		p := p
+		p = linalg.fract(p * .1031)
+		p *= p + 33.33
+		p *= p + p
+		return linalg.fract(p)
+	}
+
+	random_symmetric :: proc(p: f32) -> f32 {
+		p := p
+		p *= 219.0
+		return 2.0 * hash11(p) - 1.0
+	}
+
+	for i in 0..=50 {
+		make_rect_body(world, Body{pos = V2{random_symmetric(cast(f32)i + 20.0), random_symmetric(cast(f32)i + 1298.0)}*10.0, vel = V2{random_symmetric(cast(f32)i + 1289.0),random_symmetric(cast(f32)i + 192.0)}, inverse_mass = 1})
+	}
+}
+
+SceneInfo :: struct {
+	name: string,
+	init_function: proc(state: ^SceneState, world: ^World),
+	process_function: proc(state: ^SceneState, world: ^World),
+}
+
+scenes := []SceneInfo {
+	SceneInfo{"position testing", scene_position_testing_init, scene_position_testing_process}
+	SceneInfo{"simple boxes", scene_simple_boxes_init, scene_simple_boxes_process}
+	SceneInfo{"chaos", scene_chaos_init, scene_simple_boxes_process}
+}
+
+switch_to_scene :: proc(state: ^SceneState, world: ^World, to: SceneInfo) {
+	clear(&world.bodies)
+	clear(&world.shapes)
+	state^ = SceneState{}
+	world^ = World{}
+	state.paused = true
+	state.unprocessed_time = 0.0
+	to.init_function(state, world)
 }
 
 main :: proc() {
@@ -257,32 +414,82 @@ main :: proc() {
     raylib.InitWindow(cast(i32)screen_size.x, cast(i32)screen_size.y, "Hello")
     fmt.println("What's up dawg")
 
+	do_position_testing: bool = false
+
+	// body world to local and local to world testing
+	{
+		approx_eq :: proc(v1, v2: V2) -> bool {
+			dist := v1 - v2
+			return linalg.length(dist) < 0.0001
+		}
+		b: Body
+		b.pos = V2{2, 1}
+		b.ang = 12.0
+		equivalent_point := V2{2, 2}
+		in_world := body_local_to_world(b, equivalent_point)
+		back_to_local := body_world_to_local(b, in_world)
+		//fmt.printf("%v - %v - %v\n", equivalent_point, in_world, back_to_local)
+		assert(approx_eq(back_to_local, equivalent_point))
+	}
+
     world := World{}
+	state := SceneState{}
+	cur_scene_index := 0
+	cur_scene: SceneInfo = scenes[cur_scene_index]
+	switch_to_scene(&state, &world, cur_scene)
 	defer delete(world.bodies)
 	defer delete(world.shapes)
     time: f64 = 0.0
-    unprocessed_time: f64 = 0.0
-    make_rect_body(&world, Body{pos = V2{2, 1}, vel = V2{1, 0}})
-    make_rect_body(&world, Body{pos = V2{-1, 1.5}, vel = V2{2, 0}})
+	scene_notif_fade: f32 = 1.0
 
     for !raylib.WindowShouldClose() {
-        defer free_all(context.temp_allocator)
+		// drawing can happen all the time only for debug purposes right now...
+		raylib.BeginDrawing()
+		defer {
+			raylib.EndDrawing()
+			free_all(context.temp_allocator)
+		}
+		
+		cur_scene.process_function(&state, &world)
 
-        // physics processing
-        unprocessed_time += cast(f64) raylib.GetFrameTime()
-        for unprocessed_time > TIMESTEP {
-            defer unprocessed_time -= TIMESTEP
-            process(&world, TIMESTEP)
-        }
 
+		// do general frame stuff and drawing stuff
         {
-            raylib.BeginDrawing()
-            defer raylib.EndDrawing()
-
             // ui processing and drawing
+			for d, index in debug {
+				if d.lifetime > 0.0 {
+					debug[index].lifetime -= raylib.GetFrameTime()*7.0
+					raylib.DrawCircleV(into_screen(debug[index].at_world), 5.0, blendalpha(rgb(1,0,0), debug[index].lifetime))
+				} else {
+					debug[index].lifetime = 0.0
+				}
+			}
             if raylib.IsMouseButtonDown(raylib.MouseButton.LEFT) {
                 camera.offset += flip(raylib.GetMouseDelta()/camera.scale)
             }
+			if raylib.IsKeyPressed(raylib.KeyboardKey.SPACE) {
+				state.paused = !state.paused
+			}
+			if raylib.IsKeyPressed(raylib.KeyboardKey.RIGHT) {
+				cur_scene_index += 1
+				cur_scene_index %= len(scenes)
+				cur_scene = scenes[cur_scene_index]
+				switch_to_scene(&state, &world, cur_scene)
+				scene_notif_fade = 1.0
+			}
+			raylib.DrawText(strings.clone_to_cstring(cur_scene.name, context.temp_allocator), 200, 0, 40, blendalpha(rgb(1, 1, 1), scene_notif_fade))
+			scene_notif_fade = linalg.lerp(scene_notif_fade, 0.0, raylib.GetFrameTime()*3.0)
+
+			text: cstring
+			color: raylib.Color
+			if state.paused {
+				text = "paused"
+				color = rgb(1, 0, 0)
+			} else {
+				text = "unpaused"
+				color = rgb(0, 1, 0)
+			}
+			raylib.DrawText(text, 0, 0, 15, color)
 
             // draw reference grid in world
             grid_size: float = 5.0
@@ -303,7 +510,7 @@ main :: proc() {
 
             for body in world.bodies {
                 if body.exists {
-                    draw_body(world, body)
+                    draw_body(world, body, rgb(1, 0, 0))
                 }
             }
 
